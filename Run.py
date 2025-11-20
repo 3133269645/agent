@@ -31,19 +31,7 @@ TOOL_FUNCTIONS = {
     "search_jiaowu_score": search_jiaowu_score,
 }
 
-
-def build_system_prompt(tool_history: List[Dict[str, Any]]) -> str:
-    """
-    将最新的工具调用结果注入系统提示词。
-    """
-    if tool_history:
-        trimmed_history = tool_history[-5:]
-        tool_results_text = json.dumps(trimmed_history, ensure_ascii=False, indent=2)
-    else:
-        tool_results_text = "暂无工具调用记录。"
-    return master_prompt.format(tool_results=tool_results_text)
-
-
+# 调用模型
 def call_openai(messages: List[Dict[str, Any]]):
     return client.chat.completions.create(
         model=model_name,
@@ -55,89 +43,38 @@ def call_openai(messages: List[Dict[str, Any]]):
     )
 
 
-def _serialise_result(result_payload: Dict[str, Any]) -> str:
-    try:
-        return json.dumps(result_payload, ensure_ascii=False)
-    except TypeError:
-        safe_payload = {
-            "success": result_payload.get("success", False),
-            "error": "结果包含无法序列化的内容，已截断。",
-        }
-        return json.dumps(safe_payload, ensure_ascii=False)
-
-
+# 调用工具
 def execute_tool_call(tool_call) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     执行单个工具调用，返回用于 OpenAI 对话的 tool 消息和记录摘要。
     """
     function_name = tool_call.function.name
     raw_arguments = tool_call.function.arguments or "{}"
-
-    try:
-        function_args = json.loads(raw_arguments)
-    except json.JSONDecodeError as exc:
-        logger.exception("工具参数解析失败: %s", raw_arguments)
-        result_payload = {
-            "success": False,
-            "error": f"无法解析参数: {exc}",
-            "raw_arguments": raw_arguments,
-        }
-        tool_message = {
-            "role": "tool",
-            "tool_call_id": tool_call.id,
-            "content": _serialise_result(result_payload),
-        }
-        summary = {
-            "tool": function_name,
-            "arguments": {},
-            "result": result_payload,
-        }
-        return tool_message, summary
+    function_args = json.loads(raw_arguments)
 
     func = TOOL_FUNCTIONS.get(function_name)
     logger.info("• 调用工具: %s", function_name)
     logger.info("• 参数: %s", function_args)
 
-    if not func:
-        result_payload = {
-            "success": False,
-            "error": f"未知工具: {function_name}",
-        }
-    else:
-        try:
-            result_data = func(**function_args)
-            result_payload = {
-                "success": True,
-                "data": result_data,
-            }
-        except TypeError as exc:
-            logger.exception("工具参数错误: %s", exc)
-            result_payload = {
-                "success": False,
-                "error": f"参数错误: {exc}",
-            }
-        except Exception as exc:  # pylint: disable=broad-except
-            logger.exception("工具执行异常: %s", exc)
-            result_payload = {
-                "success": False,
-                "error": f"执行异常: {exc}",
-            }
+
+    result_data = func(**function_args)
+    result_payload = {
+        "success": True,
+        "data": result_data,
+    }
+
 
     logger.info("• 结果: %s", result_payload)
 
     tool_message = {
         "role": "tool",
         "tool_call_id": tool_call.id,
-        "content": _serialise_result(result_payload),
+        "content":f"{result_payload}"
     }
-    summary = {
-        "tool": function_name,
-        "arguments": function_args,
-        "result": result_payload,
-    }
-    return tool_message, summary
 
+    return tool_message
 
+# 消耗统计
 def _log_execution_summary(
     execution_time: float,
     iterations: int,
@@ -159,7 +96,7 @@ def _log_execution_summary(
         logger.info("• 平均每次调用: %.1f tokens", total_tokens / api_call_count if total_tokens else 0)
     logger.info("==" * 60)
 
-
+# 主逻辑
 def run_master_agent(user_input: str, max_iterations: int = 10) -> str:
     """
     执行面向深圳技术大学场景的智能助手循环，直到获得最终回答或达到迭代上限。
@@ -173,16 +110,16 @@ def run_master_agent(user_input: str, max_iterations: int = 10) -> str:
     logger.info("• 用户查询: %s", user_input)
     logger.info("==" * 60)
 
-    conversation: List[Dict[str, Any]] = [{"role": "user", "content": user_input}]
-    tool_history: List[Dict[str, Any]] = []
+    message = [{"role": "user", "content": f"用户问题:{user_input}"},{"role": "system", "content": master_prompt}]
+
 
     for iteration in range(1, max_iterations + 1):
         logger.info("• 第 %s 轮工具调用:", iteration)
 
-        system_message = {"role": "system", "content": build_system_prompt(tool_history)}
-        messages = [system_message, *conversation]
-        response = call_openai(messages)
 
+        response = call_openai(message)
+
+        # 打印运行日志
         api_call_count += 1
         if getattr(response, "usage", None):
             prompt_tokens = response.usage.prompt_tokens
@@ -199,18 +136,21 @@ def run_master_agent(user_input: str, max_iterations: int = 10) -> str:
                 tokens_used,
             )
 
-        assistant_message = response.choices[0].message
-        assistant_dict: Dict[str, Any] = {
-            "role": assistant_message.role,
-            "content": assistant_message.content,
-        }
-        if assistant_message.tool_calls:
-            assistant_dict["tool_calls"] = assistant_message.tool_calls
-        conversation.append(assistant_dict)
 
-        tool_calls = assistant_message.tool_calls or []
+        conversation = {
+            "role": response.choices[0].message.role,
+            "content": response.choices[0].message.content,
+        }
+        if response.choices[0].message.tool_calls:
+            conversation["tool_calls"] = response.choices[0].message.tool_calls
+
+        # 添加消息列表
+        message.append(conversation)
+
+        tool_calls = response.choices[0].message.tool_calls or []
+
         if not tool_calls:
-            final_content = assistant_message.content or ""
+            final_content = response.choices[0].message.content or ""
             execution_time = time.time() - start_time
             _log_execution_summary(
                 execution_time,
@@ -231,14 +171,14 @@ def run_master_agent(user_input: str, max_iterations: int = 10) -> str:
                 for tool_call in tool_calls
             }
             for future in concurrent.futures.as_completed(future_to_tool_call):
-                tool_message, summary = future.result()
-                conversation.append(tool_message)
-                tool_history.append(summary)
+                tool_message = future.result()
+                message.append(tool_message)
+
 
     logger.info("• 达到最大迭代次数 (%s)，请求最终回答。", max_iterations)
-    conversation.append({"role": "user", "content": "请基于以上工具调用结果，为用户提供准确、完整的回答。"})
-    final_messages = [{"role": "system", "content": build_system_prompt(tool_history)}, *conversation]
-    final_response = call_openai(final_messages)
+    message.append({"role": "user", "content": "请基于以上工具调用结果，为用户提供准确、完整的回答。"})
+
+    final_response = call_openai(message)
 
     api_call_count += 1
     if getattr(final_response, "usage", None):
@@ -270,18 +210,19 @@ def run_master_agent(user_input: str, max_iterations: int = 10) -> str:
 
 def main():
     """主函数 - 测试循环工具调用的校园助手"""
-    test_queries = [
-        "帮我查询我的学分情况，202200203048,nan@529499710"
-    ]
 
-    for index, query in enumerate(test_queries, 1):
+    index = 1
+    while   True:
+        query = input("输入问题：")
         print(f"• 正在测试 {index}: {query}")
         logger.info("• 正在测试 %s: %s", index, query)
-        result = run_master_agent(query, max_iterations=5)
+        result = run_master_agent(query, max_iterations=8)
         print(f"• 最终结果:\n{result}")
         logger.info("• 最终结果:\n%s", result)
         logger.info("==" * 60)
+        index += 1
 
 
 if __name__ == "__main__":
     main()
+

@@ -222,11 +222,6 @@ def search_school_card_text(
 # --- 示例调用 ---
 
 if __name__ == '__main__':
-    # ⚠️ 请根据您的实际项目结构修改路径
-
-
-    # 确保 CONTENT_BASE_DIR 能够正确指向文章内容文件所在的目录
-    # 例如：如果 text_title_list.txt 和 .txt 文件都在同一个目录，则使用上面的定义
 
     user_query = "校园卡如何使用微信充值"
 
