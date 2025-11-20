@@ -43,7 +43,7 @@ def call_openai(messages: List[Dict[str, Any]]):
     )
 
 
-# 调用工具
+#  调用工具
 def execute_tool_call(tool_call) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     执行单个工具调用，返回用于 OpenAI 对话的 tool 消息和记录摘要。
